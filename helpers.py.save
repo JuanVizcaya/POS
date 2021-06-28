@@ -1,0 +1,539 @@
+# -*- coding: utf-8 -*-
+from libraries import *
+from flask import jsonify
+reload(sys)
+sys.setdefaultencoding('utf-8')
+#sale2
+def get_stats(clicod, conn):
+    #Takes a client and a connection and returns relevant stats
+    cantidad = sqlio.read_sql_query("""SELECT ag03fc as fecha, codigo_producto, nombre_segmento,
+    ventas_raw.cantidad*ventas_raw.precio as venta, cantidad, descuento FROM ventas_raw
+    LEFT JOIN catalogo_productos ON catalogo_productos.sku = ventas_raw.codigo_producto
+    WHERE ventas_raw.clicod='{}';""".format(clicod), conn)
+    info_clicod = sqlio.read_sql_query("""SELECT DISTINCT descripcion_cliente,
+            nombre_tienda, CONCAT(calle, ', ', numero_exterior, ', ', colonia) as direccion
+            FROM catalogo_info_clientes
+            WHERE id_cliente='{}';""".format(clicod),conn)
+
+    if len(cantidad) == 0:
+        return dict()
+
+    venta_del_mes = cantidad.groupby(cantidad['fecha'].dt.month).sum().sort_values('fecha', ascending = False).reset_index().loc[0]['venta'].round().astype(int)
+    min_30d = str(pd.to_datetime(cantidad['fecha'].max()) - timedelta(days=30))
+    ventas_30d=  cantidad[cantidad['fecha'] >= min_30d]['venta'].sum()
+    venta_semanal_promedio = cantidad.groupby(cantidad['fecha'].dt.week).sum().mean()[0].round().astype(int)
+    min_6d = pd.to_datetime(cantidad['fecha'].max()) - timedelta(days=6)
+    min_6d = str(min_6d.date())
+    ventas_promedio_6d =  round(ventas_30d/26*6,2)
+    grouped = cantidad.groupby('codigo_producto')['venta'].sum().sort_values(ascending=False).reset_index()
+    prod_mas_exitoso_int = int(grouped['codigo_producto'][0])
+    prod_mas_devuelto_int = int(grouped['codigo_producto'].to_numpy()[-1])
+    #print(prod_mas_devuelto_int)
+    prod_mas_exitoso = sqlio.read_sql_query("""SELECT nombre_producto FROM catalogo_productos WHERE sku='{}'""".format(prod_mas_exitoso_int), conn)['nombre_producto']
+    if len(prod_mas_exitoso) > 0:
+        prod_mas_exitoso = prod_mas_exitoso[0]
+    else:
+        prod_mas_exitoso = str(prod_mas_exitoso_int)
+
+    prod_mas_devuelto = sqlio.read_sql_query("""SELECT nombre_producto FROM catalogo_productos WHERE sku='{}'""".format(prod_mas_devuelto_int), conn)['nombre_producto']
+    if len(prod_mas_devuelto) > 0:
+        prod_mas_devuelto = prod_mas_devuelto[0]
+    else:
+        prod_mas_devuelto = str(prod_mas_devuelto_int)
+    grouped_fecha = cantidad[(cantidad['fecha'] == str(cantidad['fecha'].max().date())) & (cantidad['venta'] >= 0)]
+    ultima_venta = grouped_fecha['venta'].sum().round().astype(int)
+    ultima_venta_fecha = str(pd.to_datetime(grouped_fecha['fecha'].unique()[0]).date())
+    if len(info_clicod) == 0:
+        dueno = " "
+        nombre_tienda = dueno
+        direccion = dueno
+    else:
+        dueno = info_clicod['nombre_tienda'].iloc[0]
+        nombre_tienda = info_clicod['descripcion_cliente'].iloc[0]
+        direccion = info_clicod['direccion'].iloc[0]
+
+    #### Vendedor
+    vendedor = sqlio.read_sql_query(
+        """
+        SELECT CONCAT(empleado_nombre, ' ', empleado_apellido_paterno, ' ', empleado_apellido_materno) AS nombre_vendedor,
+                date_part('year', age(now(), fecha_antiguedad)) AS antiguedad,
+                date_part('year', age(now(), fecha_nacimiento)) AS edad
+        FROM catalogo_empleados
+        WHERE empleado_id IN (
+            SELECT id_vend
+            FROM catalogo_rutas
+            WHERE ruta IN (
+                SELECT id_ruta
+                FROM catalogo_info_clientes
+                WHERE id_cliente='{}'
+            )
+        )
+        LIMIT 1;
+        """.format(clicod),
+        conn
+    )
+    if len(vendedor) == 0:
+        nombre_vendedor = None
+        antiguedad = None
+        edad = None
+    else:
+        nombre_vendedor = vendedor['nombre_vendedor'].iloc[0]
+        antiguedad = vendedor['antiguedad'].iloc[0]
+        edad = vendedor['edad'].iloc[0]
+
+    #Crédito pesito
+    pesito = sqlio.read_sql_query(
+        """
+        SELECT imp_pesito_cliente, dias_credito
+        FROM catalogo_info_clientes
+        WHERE id_cliente='{}'
+            AND imp_pesito_cliente > 0
+            AND dias_credito<>'0';
+        """.format(clicod),
+        conn
+    )
+
+    if len(pesito) == 0:
+        importe_pesito = None
+        dias_credito = None
+    else:
+        importe_pesito = pesito['imp_pesito_cliente'].iloc[0]
+        dias_credito = pesito['dias_credito'].iloc[0]
+
+    dict_return = {
+        'venta_del_mes': venta_del_mes,
+        'ventas_30d': ventas_30d,
+        'venta_semanal_promedio': venta_semanal_promedio,
+        'ventas_promedio_6d': ventas_promedio_6d,
+        'prod_mas_exitoso': prod_mas_exitoso,
+        'prod_mas_devuelto': prod_mas_devuelto,
+        'ultima_venta': ultima_venta,
+        'ultima_venta_fecha': ultima_venta_fecha,
+        'dueno' : dueno,
+        'nombre_tienda': nombre_tienda,
+        'direccion': direccion,
+        'nombre_vendedor': nombre_vendedor,
+        'antiguedad': antiguedad,
+        'edad': edad,
+        'importe_pesito': importe_pesito,
+        'dias_credito': dias_credito
+    }
+    return dict_return
+
+
+def parse_json_text(text_message):
+    dict_message = {}
+    dict_message['message_text'] = text_message['messageText']
+    dict_message['message_type'] = 'TEXT'
+
+    return_data = pd.DataFrame(dict_message, index=[0])
+
+    return return_data
+
+def parse_json_live_location(live_location):
+    dict_message = {}
+    dict_message['message_text'] = "LIVE LOCATION"
+    dict_message['message_type'] = 'UNKNOWN'
+    return_data = pd.DataFrame(dict_message, index=[0])
+    return return_data
+
+def parse_json_image(image_message):
+    dict_message={}
+    dict_message['mediaUrl'] = image_message['mediaUrl']
+    dict_message['message_type'] = 'IMAGE'
+    return_data = pd.DataFrame(dict_message, index=[0])
+    return return_data
+
+
+def parse_json_location(location_message):
+    dict_message = {}
+
+    dict_message['geo_point'] = location_message['location']['geoPoint']
+    dict_message['message_type'] = 'LOCATION'
+
+    return_data = pd.DataFrame(dict_message, index=[0])
+
+    return return_data
+
+def parse_json_request(json_data):
+    data = json_data['data'][0]
+    dict_data = {}
+    dict_data['source'] = data['source']
+    dict_data['origin'] = data['origin']
+    dict_data['user_name'] = data['userProfile']['name']
+    dict_data['whatsapp_id'] = data['userProfile']['whatsAppId']
+    dict_data['message_type'] = data['message']['type']
+    dict_data['received_date'] = data['receivedDate']
+    # Additional variables
+
+    dict_data['sent_status_code'] = None
+    dict_data['updated_date'] = None
+    dict_data['sent'] = None
+    dict_data['sent_date'] = None
+    dict_data['sent_status'] = None
+    dict_data['message'] = None
+
+
+    if dict_data['message_type'] == "TEXT":
+        return_data_message = parse_json_text(data['message'])
+        dict_data['short_content'] = return_data_message['message_text'][0]
+    elif dict_data['message_type'] == "LOCATION":
+        return_data_message = parse_json_location(data['message'])
+        dict_data['short_content'] = return_data_message['geo_point'][0]
+    elif dict_data['message_type'] == "UNKNOWN":
+        return_data_message = parse_json_live_location(data['message'])
+        dict_data['short_content'] = "LIVE LOCATION"
+    elif dict_data['message_type'] == "IMAGE":
+        return_data_message = parse_json_image(data['message'])
+        dict_data['short_content'] = return_data_message['mediaUrl'][0]
+    else:
+        dict_data['short_content'] = "MENSAJE NO SOPORTADO"
+        return_data_message = "MENSAJE NO SOPORTADO"
+
+    return_data = pd.DataFrame(dict_data, index=[0])
+
+    return return_data, return_data_message
+
+
+def parse_json_status(json_data):
+    data = json_data['data'][0]
+    dict_data = {}
+    dict_data['sent_status_code'] = data['sentStatusCode']
+    dict_data['sent_status'] = data['sentStatus']
+    dict_data['updated_date'] = data['updatedDate']
+    dict_data['sent'] = data['sent']
+    dict_data['sent_date'] = data['sentDate']
+    dict_data['correlation_id'] = data['correlationId']
+    #agregar nu
+    return_data = pd.DataFrame(dict_data, index=[0])
+    return return_data
+
+def add_correlation_id(correlation_id,conn,table='log_messages'):
+    sqlio.execute(
+        """
+        INSERT INTO {}(correlation_id)
+        VALUES ('{}')
+        """.format(table, correlation_id),
+        conn
+    )
+    conn.commit()
+    return 1
+
+
+def update_postgres_iniciatives(conn, df, corr_id, table='log_iniciatives'):
+
+    generated_date = df['generated_date'][0]
+    whatsapp_id = df['whatsapp_id'][0]
+    message = df['message'][0]
+    c=conn.cursor
+
+    c.execute(
+        """
+        UPDATE {}
+        SET generated_date = '{}'::timestamp AT TIME ZONE 'Z',
+            message = '{}',
+            whatsapp_id = '{}'
+        WHERE correlation_id = '{}'
+        """.format(table, generated_date, message, whatsapp_id, corr_id),
+        conn
+    )
+
+    conn.commit()
+
+    print('Updated table: ' + str(table))
+
+
+def update_postgres_request(conn, df, corr_id, table='log_messages'):
+    source = df['source'][0]
+    origin = df['origin'][0]
+    user_name = df['user_name'][0]
+    whatsapp_id = df['whatsapp_id'][0]
+    message_type = df['message_type'][0]
+    received_date = df['received_date'][0]
+    short_content = df['short_content'][0]
+
+
+    sqlio.execute(
+        """
+        UPDATE {}
+        SET source = '{}',
+            origin = '{}',
+            user_name = '{}',
+            whatsapp_id = '{}',
+            message_type = '{}',
+            received_date = '{}'::timestamp AT TIME ZONE 'Z',
+            short_content = '{}'
+        WHERE correlation_id='{}'
+        """.format(table, source, origin, user_name, whatsapp_id, message_type, received_date, short_content, corr_id),
+        conn
+    )
+    conn.commit()
+    print('updated table:' + str(table))
+
+
+def update_postgres_text(conn, df, corr_id, table='log_messages_text'):
+    message_text = df['message_text']
+    message_type = df['message_type']
+
+
+    sqlio.execute(
+        """
+        UPDATE {}
+        SET message_text = '{}',
+            message_type = '{}',
+            correlation_id = '{}'
+        """.format(table, message_text, message_type, corr_id),
+        conn
+    )
+    conn.commit()
+    print('updated table: ' + str(table))
+
+
+def update_postgres_location(conn, df, corr_id, table='log_messages_location'):
+    geo_point = df['geo_point']
+    message_type = df['message_type']
+
+
+    sqlio.execute(
+        """
+        UPDATE {}
+        SET geo_point = '{}',
+            message_type = '{}',
+            correlation_id = '{}'
+        """.format(table, geo_point, message_type, corr_id),
+        conn
+    )
+    conn.commit()
+    print('updated table: ' + str(table))
+
+def update_postgres_image(conn, df, corr_id, table='log_messages_location'):
+    #TODO UPDATE
+    pass
+    # geo_point = df['geo_point']
+    # message_type = df['message_type']
+    #
+    #
+    # sqlio.execute(
+    #     """
+    #     UPDATE {}
+    #     SET geo_point = '{}',
+    #         message_type = '{}',
+    #         correlation_id = '{}'
+    #     """.format(table, geo_point, message_type, corr_id),
+    #     conn
+    # )
+    # conn.commit()
+    # print('updated table')
+
+
+def update_postgres_message(conn, message, corr_id, codigo,table='log_messages'):
+    sqlio.execute(
+        """
+        UPDATE {}
+        SET message = '{}'
+        WHERE correlation_id='{}'
+        """.format(table, message, corr_id),
+        conn
+    )
+    conn.commit()
+    print('updated table: ' + str(table))
+
+
+def update_postgres_message_wraper(conn, parsed_request, correlation_id, message_data):
+    #Updating log_messages
+    # Initial insert
+    message_type = parsed_request['message_type'][0]
+    update_postgres_request(conn, parsed_request, correlation_id)
+    if message_type == 'TEXT':
+        update_postgres_text(conn, message_data, correlation_id)
+    elif message_type == 'LOCATION':
+        update_postgres_location(conn, message_data, correlation_id)
+    elif message_type == 'IMAGE':
+        update_postgres_image(conn, message_data, correlation_id)
+    #print(parsed_request.iloc[0])
+    #print(message_data)
+
+
+def find_table(corr_id, conn):
+
+    search = sqlio.read_sql_query(
+        """
+        SELECT *
+        FROM log_messages
+        WHERE correlation_id='{}'
+        """.format(corr_id),
+        conn
+    )
+
+    if search.empty:
+        return 'log_iniciatives'
+    else:
+        return 'log_messages'
+
+def update_postgres(conn, df, corr_id, table='log_messages'):
+    _sent = df['sent'][0]
+    _sent_date = df['sent_date'][0]
+    _sent_status = df['sent_status'][0]
+    _sent_status_code = df['sent_status_code'][0]
+    _updated_date =  df['updated_date'][0]
+
+    sqlio.execute(
+        """
+        UPDATE {}
+        SET sent = '{}',
+            sent_date = '{}'::timestamp AT TIME ZONE 'Z',
+            sent_status = '{}',
+            sent_status_code = '{}',
+            updated_date = '{}'::timestamp AT TIME ZONE 'Z'
+        WHERE correlation_id='{}'
+        """.format(table, _sent, _sent_date, _sent_status, _sent_status_code, _updated_date, corr_id),
+        conn
+    )
+    conn.commit()
+
+    print('updated table: ' + str(table))
+
+def get_msg(json_data):
+    #json_data = request.json
+    if json_data['data'][0]['message']['type'] == "TEXT":
+        message = json_data['data'][0]['message']['messageText'].lower()
+        geo = False
+        lat = None
+        lon = None
+        number = json_data['data'][0]['userProfile']['whatsAppId']
+        nombre = json_data['data'][0]['userProfile']['name']
+    elif json_data['data'][0]['message']['type'] == "LOCATION":
+        message = json_data['data'][0]['message']['location']['geoPoint']
+        geo = True
+        lat = message.split(",")[0]
+        lon = message.split(",")[1]
+        number = json_data['data'][0]['userProfile']['whatsAppId']
+        nombre = json_data['data'][0]['userProfile']['name']
+    elif json_data['data'][0]['message']['type'] == "UNKNOWN":
+        message = "LIVE LOCATION"
+        geo = False
+        lat = None
+        lon = None
+        number = json_data['data'][0]['userProfile']['whatsAppId']
+        nombre = json_data['data'][0]['userProfile']['name']
+    elif json_data['data'][0]['message']['type'] == "IMAGE":
+        message = json_data['data'][0]['message']['mediaUrl']
+        geo = False
+        lat = None
+        lon = None
+        number = json_data['data'][0]['userProfile']['whatsAppId']
+        nombre = json_data['data'][0]['userProfile']['name']
+    else:
+        message = json_data['data'][0]['message']
+        geo = False
+        lat = None
+        lon = None
+        number = json_data['data'][0]['userProfile']['whatsAppId']
+        nombre = json_data['data'][0]['userProfile']['name']
+    return message, geo, lat, lon, number, nombre
+
+
+
+
+def send_message(message,number,correlation_id,rodman=True):
+    url = "https://api-messaging.movile.com/v1/whatsapp/send"
+    headers = {
+        'username': "WA_ORAX_MX",
+        'authenticationtoken': "zjSVi4Kp25lHkA5NLORxFoKvi1PmMQ0Zg6p3WpoF",
+
+        }
+
+    destination = "+"+str(number)
+    payload = """
+            {
+                "destinations": [{
+                    "correlationId": "%s",
+                    "destination": "%s"
+                }],
+                "message": {
+                    "messageText": "%s"
+                }
+            }
+            """ % (correlation_id,destination,message)
+
+    response = requests.request("POST", url, data=payload, headers=headers)
+    #return(jsonify(message))
+    if rodman:
+        return(jsonify(message))
+    else:
+        return(1)
+
+
+def get_print_summary_short(clicod,stats,geo=False,lat=False,lon=False):
+    venta_del_mes = stats['venta_del_mes']
+    ventas_30d = stats['ventas_30d']
+    venta_semanal_promedio = stats['venta_semanal_promedio']
+    ventas_promedio_6d = stats['ventas_promedio_6d']
+    prod_mas_exitoso = stats['prod_mas_exitoso']
+    prod_mas_devuelto = stats['prod_mas_devuelto']
+    ultima_venta = stats['ultima_venta']
+    ultima_venta_fecha = stats['ultima_venta_fecha']
+    dueno = stats['dueno']
+    nombre_tienda =  stats['nombre_tienda']
+    direccion = stats['direccion']
+    nombre_vendedor = stats['nombre_vendedor']
+    importe_pesito = stats['importe_pesito']
+    dias_credito = stats['dias_credito']
+    antiguedad = stats['antiguedad']
+    edad = stats['edad']
+    salto= """
+
+    -"""
+    new_line = "\\n"
+    info_cliente = str("Client info: " + str(clicod)) + ': *' + nombre_tienda + ' / ' + dueno + "*"
+    venta_ultimos_30 = str("Total sales (last 30 days): *$" + '{:,}'.format(ventas_30d)) +"*"
+    semanal_promedio = str("Weekly sales average: *$" + '{:,}'.format(ventas_promedio_6d)) +"*"
+    ultima = str("Sales last visit *$" + '{:,}'.format(ultima_venta)) +"*"
+    mas_dev = str("Top product: *" + prod_mas_devuelto) +"*"
+    max_exit = str("Most returned product: *" + prod_mas_exitoso) +"*"
+    if nombre_vendedor is not None:
+        info_vend = "Salesperson: *" + str(nombre_vendedor) + '*, ' + str(int(edad)) + ' years, seniority: ' + str(int(antiguedad)) + ' years'
+    else:
+        info_vend = ""
+
+    if importe_pesito is not None:
+        info_pesito = "Status _pesito_: *" + str(dias_credito) + '* credit days. Ammount *$' + '{:,}*'.format(importe_pesito)
+    else:
+        info_pesito = ""
+    message = info_cliente + new_line + venta_ultimos_30 + new_line + semanal_promedio + new_line + max_exit + new_line + mas_dev + new_line + info_vend + new_line +  info_pesito
+
+    #print "This is the message: \n" + message
+    #print "This is geo: \n" + str(geo)
+
+    if geo==True:
+    	near_lat=lat
+    	near_lon=lon
+        direccion = str(u"*Visit the store:* in: " + direccion + " http://www.google.com/maps/place/{},{}".format(near_lat,near_lon))
+        message = message + new_line + new_line + direccion + new_line + new_line + "*Help us* to enrich Bimbo’s information repository by sending a picture of a store’s shelf. 📷"
+        return message
+    else:
+        return message
+
+
+def trusted_ip(trustedIPs):
+	if request.remote_addr not in trustedIPs:
+		return abort(403, description="Shall not pass")
+
+def send_pics():
+    pass
+
+
+def get_message(codigo, nombre="", clicod=None):
+    if codigo == 400 or codigo=="bad_request":
+        message_text = u"Hello {}, in order for me to help you, please share with me your current location or a client code so I can provide you with the most relevant POS insights.".format(nombre)
+    if codigo == 404:
+        message_text = str(u"The provided client was not found: " + str(clicod))
+    if codigo == 503 or codigo == "mantenimiento":
+        message_text = (u"Para brindarte un mejor servicio el Bot se encuentra en mantenimiento. Favor de comunicarte al +525541339883 para mas información.")
+    if codigo == 999 or codigo == "live":
+        message_text = (u"Please share with me your current location. (Not live location)")
+    if codigo == "image_message":
+        message_text = u"Dear {}, thanks for sharing. To continue receiving POS Insights please share with me your current location or a client code.".format(nombre)
+
+    message = {'text':message_text,'estatus':codigo}
+    return message
